@@ -5,7 +5,7 @@
 # - Pérdida de rinde basada en AUC (competencia acumulada)
 # - Gateo jerárquico: preR → preemR → postR → gram
 # - Reglas agronómicas:
-#     · preR: −30 a −14 días antes de siembra
+#     · preR: −16 a −14 días antes de siembra
 #     · preemR: 0 a +10 días desde siembra
 #     · postR: +20 a +180 días (2 hojas en adelante)
 #     · gram: +25 a +35 días (3–4 hojas)
@@ -58,7 +58,7 @@ def _date_range(start_date, days):
 def simulate_with_controls(
     nyears=1, seed_bank0=4500, K=250, Tb=0.0, seed=42,
     sow_date=dt.date(2025,6,1),
-    LAI_max=6.0, t_lag=10, t_close=35, LAI_hc=6.0, Cs=200, Ca=200,
+    LAI_max=3.0, t_lag=10, t_close=35, LAI_hc=6.0, Cs=200, Ca=200,
     p_S1=1.0, p_S2=0.6, p_S3=0.4, p_S4=0.2,
     w_S1=0.15, w_S2=0.30, w_S3=0.60, w_S4=1.00,
     alpha=0.9782, Lmax=83.77, GY_pot=6000.0,
@@ -73,7 +73,7 @@ def simulate_with_controls(
     meteo = synthetic_meteo(start, end, seed)
 
     # 🧭 Ventanas fenológicas reales
-    preR_rng  = (sow - dt.timedelta(days=30), sow - dt.timedelta(days=14))
+    preR_rng  = (sow - dt.timedelta(days=16), sow - dt.timedelta(days=14))
     preem_rng = (sow, sow + dt.timedelta(days=10))
     postR_rng = (sow + dt.timedelta(days=20), sow + dt.timedelta(days=180))
     gram_rng  = (sow + dt.timedelta(days=25), sow + dt.timedelta(days=35))
