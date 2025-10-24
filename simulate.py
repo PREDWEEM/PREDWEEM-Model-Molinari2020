@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # ===============================================================
-# 🌾 WeedCropSystem — v3.15.4
+# 🌾 WeedCropSystem — v3.15.4-final
 # ---------------------------------------------------------------
 # ✔ Lote limpio a la siembra
 # ✔ Sensibilidad ajustable (1×–7×) durante el PC (8/oct–4/nov)
 # ✔ Pérdida hiperbólica aplicada al AUC ponderado global
-# ✔ Gateo jerárquico (preR→preemR→postR→gram) con reglas
-# ✔ Streamlit + optimización de fechas + franja visual del PC
+# ✔ Gateo jerárquico (preR→preemR→postR→gram)
+# ✔ Streamlit + franja visual del PC
 # ===============================================================
 
 import sys, datetime as dt
@@ -58,7 +58,7 @@ def _date_range(start_date, days):
     return {start_date + dt.timedelta(days=i) for i in range(int(days))}
 
 # ===============================================================
-# 🧠 Simulador con gateo jerárquico + AUC ponderado
+# 🧠 Simulador con gateo jerárquico + AUC ponderado global
 # ===============================================================
 def simulate_with_controls(
     nyears=1, seed_bank0=4500, K=250, Tb=0.0, seed=42,
@@ -77,7 +77,7 @@ def simulate_with_controls(
     end = dt.date(sow.year + int(nyears) - 1, 12, 1)
     meteo = synthetic_meteo(start, end, seed)
 
-    # --- Reglas fenológicas (corregidas) ---
+    # --- Reglas fenológicas corregidas ---
     preR_rng  = (sow - dt.timedelta(days=30), sow - dt.timedelta(days=14))
     preem_rng = (sow, sow + dt.timedelta(days=10))
     postR_rng = (sow + dt.timedelta(days=20), sow + dt.timedelta(days=180))
@@ -102,7 +102,6 @@ def simulate_with_controls(
     for _, row in meteo.iterrows():
         date = pd.to_datetime(row["date"]).date()
         if date < sow: continue
-
         dss = (date - sow).days
         Tmean = (row["tmin"] + row["tmax"]) / 2
         TTw += max(Tmean - Tb, 0)
@@ -168,9 +167,9 @@ def simulate_with_controls(
     return df
 
 # ===============================================================
-# 🌾 Streamlit
+# 🌾 Streamlit principal
 # ===============================================================
-st.set_page_config(page_title="WeedCropSystem v3.15.4", layout="wide")
+st.set_page_config(page_title="WeedCropSystem v3.15.4-final", layout="wide")
 st.title("🌾 WeedCropSystem v3.15.4 — Sensibilidad ajustable del PC")
 
 # --- Parámetros base ---
@@ -199,8 +198,6 @@ p_S4 = st.sidebar.slider("S4", 0.0, 2.0, 0.2, 0.1)
 st.sidebar.subheader("🌾 Rinde potencial y pérdida")
 GY_pot = st.sidebar.number_input("Rinde potencial (kg/ha)", 1000, 15000, 6000, 100)
 alpha, Lmax = 0.9782, 83.77
-
-# --- Control nuevo: sensibilidad del PC ---
 sens_factor_pc = st.sidebar.slider("Sensibilidad durante PC (×)", 1.0, 7.0, 5.0, 0.5)
 
 st.sidebar.header("Eficacias (%) y residualidades (días)")
@@ -225,13 +222,7 @@ base_kwargs = dict(
   sens_factor_pc=sens_factor_pc
 )
 
-# --- Gráficos ---
-def add_pc_band(fig, pc_ini, pc_fin):
-    fig.add_vrect(x0=pc_ini, x1=pc_fin, fillcolor="LightSalmon",
-                  opacity=0.25, layer="below", line_width=0)
-
-# --- Simulación única ---
-st.sidebar.markdown("---")
+# --- Simulación ---
 if st.sidebar.button("▶ Ejecutar simulación"):
     df = simulate_with_controls(**base_kwargs)
     if df is None or df.empty:
@@ -243,7 +234,7 @@ if st.sidebar.button("▶ Ejecutar simulación"):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
         fig.add_trace(go.Scatter(x=df["date"], y=df["Loss_running_%"], name="Pérdida (%)", yaxis="y2"))
-        add_pc_band(fig, pc_ini, pc_fin)
+        fig.add_vrect(x0=pc_ini, x1=pc_fin, fillcolor="LightSalmon", opacity=0.25, line_width=0)
         fig.update_layout(
             title=f"Rinde y Pérdida (%) — Sensibilidad ×{sens_factor_pc:.1f} en PC",
             xaxis_title="Fecha", yaxis_title="Rinde (kg/ha)",
@@ -251,6 +242,11 @@ if st.sidebar.button("▶ Ejecutar simulación"):
             template="plotly_white"
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        # ---- Métricas finales ----
+        st.metric("🧮 AUC ponderado final", f"{df['AUC_weighted'].iloc[-1]:.2f}")
         st.metric("💰 Rinde final", f"{df['Yield_abs_kg_ha'].iloc[-1]:.0f} kg/ha")
         st.metric("📉 Pérdida final", f"{df['Loss_running_%'].iloc[-1]:.2f}%")
-        st.metric("🧮 AUC ponderado final
+
+        st.download_button("📥 Descargar CSV", df.to_csv(index=False).encode(),
+                           "simulacion_v3154.csv", "text/csv")
