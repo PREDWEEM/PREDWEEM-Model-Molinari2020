@@ -153,3 +153,13 @@ def simulate_with_controls(
     df["Yield_relative_%"] = 100 - df["Yield_loss_%"]
     df["Yield_abs_kg_ha"] = GY_pot * (df["Yield_relative_%"]/100)
     return df
+
+    
+
+
+
+
+
+
+
+
