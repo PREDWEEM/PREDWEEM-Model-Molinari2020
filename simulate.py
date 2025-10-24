@@ -176,15 +176,27 @@ def simulate_with_controls(
     PC_fin = dt.date(sow.year, 11, 4)
     df["Sens_factor"] = np.where((df["date"]>=PC_ini)&(df["date"]<=PC_fin), 5.0, 1.0)
 
-    # AUC ponderado (trapezoidal) de WC × Sens
-    wcw = (df["WC"] * df["Sens_factor"]).to_numpy()
-    auc_running = np.concatenate(([0.0], np.cumsum(0.5*(wcw[1:] + wcw[:-1]))))
-    df["AUC_weighted"] = auc_running
+    # ======== AUC ponderado (trapezoidal) ========
+wcw = (df["WC"] * df["Sens_factor"]).to_numpy()
+auc_running = np.concatenate(([0.0], np.cumsum(0.5*(wcw[1:] + wcw[:-1]))))
+df["AUC_weighted"] = auc_running
 
-    # Pérdida "running" + final (función hiperbólica aplicada al AUC)
-    def _loss(x, alpha, Lmax): return (alpha*float(x)) / (1.0 + (alpha*float(x)/Lmax))
-    df["Loss_running_%"] = [_loss(x, alpha, Lmax) for x in df["AUC_weighted"]]
-    loss_final_pct = float(df["Loss_running_%"].iloc[-1])
+# ======== Cálculo de pérdida diaria ponderada ========
+def _loss(x, alpha, Lmax): return (alpha*x)/(1+(alpha*x/Lmax))
+
+# Aplicar pérdida incremental diaria
+df["Loss_daily"] = 0.0
+for i in range(1, len(df)):
+    delta_auc = df["AUC_weighted"].iloc[i] - df["AUC_weighted"].iloc[i-1]
+    if PC_ini <= df["date"].iloc[i] <= PC_fin:
+        delta_loss = _loss(delta_auc * 5.0, alpha, Lmax)  # sensibilidad ×5 solo dentro del PC
+    else:
+        delta_loss = _loss(delta_auc, alpha, Lmax)
+    df.loc[i, "Loss_daily"] = delta_loss
+
+# Pérdida acumulada (running)
+df["Loss_running_%"] = np.cumsum(df["Loss_daily"])
+
 
     df["Yield_relative_%"] = 100.0 - df["Loss_running_%"]
     df["Yield_abs_kg_ha"]  = GY_pot * (df["Yield_relative_%"]/100.0)
