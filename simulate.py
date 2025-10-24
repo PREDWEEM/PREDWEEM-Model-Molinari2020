@@ -277,7 +277,12 @@ if st.sidebar.button("▶ Ejecutar simulación"):
         fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
         fig.add_trace(go.Scatter(x=df["date"], y=df["Loss_running_%"], name="Pérdida (%)", yaxis="y2"))
         fig.add_vrect(x0=pc_ini, x1=pc_fin, fillcolor="LightSalmon", opacity=0.25, line_width=0)
-        fig.add_vline(x=peak, line_width=2, line_dash="dash", annotation_text="Máx. dPérdida", annotation_position="top")
+        fig.add_vline(
+    x=pd.to_datetime(peak),
+    line_width=2, line_dash="dash",
+    annotation_text="Máx. dPérdida", annotation_position="top"
+)
+
         fig.update_layout(
             title=f"Rinde y Pérdida — AUC ponderado (×{sens_factor_pc:.1f} en PC) | pico: {peak}",
             xaxis_title="Fecha",
