@@ -1,11 +1,11 @@
-
 # -*- coding: utf-8 -*-
 # ===============================================================
-# 🌾 WeedCropSystem — v3.9.3 (Reinfestación final %)
+# 🌾 WeedCropSystem — v3.9.2 (Reinfestación incluida)
 # ---------------------------------------------------------------
 # - Una única especie
 # - Emergencia intensificada ×8
-# - Reinfestación = (Semillas finales − iniciales) / iniciales × 100
+# - Índice de competencia WC → pérdida de rinde (α/Lmax fijos)
+# - Nivel de reinfestación (%) agregado
 # ===============================================================
 
 import sys, datetime as dt
@@ -78,7 +78,8 @@ def simulate(
         Tmean = (float(row["tmin"])+float(row["tmax"])) / 2
         TTw += max(Tmean - float(Tb), 0)
         Ciec_t, LAI_t = ciec_calendar(dss, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca)
-        E_t = 8.0 * emergence_simple(TTw, float(row["prec"]))  # intensifica emergencia
+        # emergencia ×8
+        E_t = 8.0 * emergence_simple(TTw, float(row["prec"]))
 
         Wk = sum(np.array(W)*np.array([0.15,0.3,0.6,1.0,0.0]))
         surv_intra = 1 - min(Wk/K,1)
@@ -120,11 +121,9 @@ def simulate(
     df["Yield_relative_%"]=100-df["Yield_loss_%"]
     df["Yield_abs_kg_ha"]=GY_pot*(df["Yield_relative_%"]/100)
 
-    # 🔹 Nivel de reinfestación final (%)
-    S_ini = seed_bank0
-    S_fin = df["W5"].iloc[-1]
-    reinfest_pct = ((S_fin - S_ini) / S_ini) * 100
-    df.attrs["reinfest_pct"] = reinfest_pct
+    # 🔹 Nivel de reinfestación (%)
+    df["Reinfest_pct"]=100*df["W_total"].diff()/df["W_total"].shift(1)
+    df["Reinfest_pct"].fillna(0,inplace=True)
     return df
 
 # ---------- Streamlit ----------
@@ -132,8 +131,8 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
     import streamlit as st
     import plotly.graph_objects as go
 
-    st.set_page_config(page_title="WeedCropSystem v3.9.3", layout="wide")
-    st.title("🌾 WeedCropSystem — v3.9.3 (Reinfestación final %)")
+    st.set_page_config(page_title="WeedCropSystem v3.9.2", layout="wide")
+    st.title("🌾 WeedCropSystem — v3.9.2 (con reinfestación %)")
 
     nyears = st.sidebar.slider("Años a simular",1,10,3)
     seed_bank0=st.sidebar.number_input("Banco inicial (semillas·m⁻²)",0,20000,4500)
@@ -142,24 +141,6 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
     sim_seed=st.sidebar.number_input("Semilla aleatoria clima",0,999999,42)
     sow_date=st.sidebar.date_input("Fecha de siembra",dt.date(2025,6,1))
 
-    st.sidebar.subheader("🌾 Rinde potencial")
-    gy_opt=st.sidebar.selectbox("Seleccionar cultivo:",["Trigo (6000)","Cebada (7000)","Personalizado"])
-    GY_pot=6000.0 if "Trigo" in gy_opt else 7000.0 if "Cebada" in gy_opt else st.sidebar.number_input("GY_pot (kg/ha)",1000,15000,6000,100)
-
-    if st.sidebar.button("▶ Ejecutar simulación"):
-        df=simulate(seed_bank0=seed_bank0, GY_pot=GY_pot)
-        reinfest_pct=df.attrs["reinfest_pct"]
-
-        fig=go.Figure()
-        fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)", line=dict(color="green")))
-        fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_loss_%"], name="Pérdida (%)", yaxis="y2", line=dict(color="red")))
-        fig.update_layout(title="Rinde y pérdida", xaxis_title="Fecha",
-                          yaxis_title="Rinde (kg/ha)", yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"))
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.metric("💰 Rinde final (kg/ha)", f"{df['Yield_abs_kg_ha'].iloc[-1]:.0f}")
-        st.metric("🌾 Rinde relativo (%)", f"{df['Yield_relative_%'].iloc[-1]:.1f}")
-        st.metric("🧮 Pérdida final (%)", f"{df['Yield_loss_%'].iloc[-1]:.1f}")
-        st.metric("🌱 Reinfestación final (%)", f"{reinfest_pct:.1f}")
-
-        st.download_button("📥 Descargar CSV", df.to_csv(index=False).encode(),"weedcrop_v393_reinfest.csv","text/csv")
+    st.sidebar.subheader("🌾 Rinde potencial del cultivo (GY_pot)")
+    gy_opt=st.sidebar.selectbox("Seleccionar cultivo:",["Trigo (6000 kg/ha)","Cebada (7000 kg/ha)","Personalizado"])
+    if
