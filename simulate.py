@@ -101,7 +101,7 @@ def simulate_with_controls(
         Tmean = (row["tmin"] + row["tmax"]) / 2
         TTw += max(Tmean - Tb, 0)
         Ciec_t, LAI_t = ciec_calendar(dss, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca)
-        E_t = 8.0 * emergence_simple(TTw, row["prec"])
+        E_t = 2.0 * emergence_simple(TTw, row["prec"])
         Wk = sum(np.array(W)*np.array([0.15,0.3,0.6,1.0,0.0]))
         surv_intra = 1 - min(Wk/K,1)
         sup_S1 = (1-Ciec_t)**p_S1
