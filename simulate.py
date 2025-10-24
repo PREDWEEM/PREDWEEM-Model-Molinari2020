@@ -86,9 +86,9 @@ def simulate_with_controls(
     postR_window  = set() if postR_date is None else _date_range(postR_date, postR_residual)
     gram_window   = set() if gram_date is None else _date_range(gram_date, gram_residual_forward)
 
-    # 🌱 Penalización sobre banco de semillas (efecto preR + preemR)
-    eff_pre_bank = 1 - (1 - preR_eff/100.0) * (1 - preemR_eff/100.0)
-    Sq = float(seed_bank0) * (1 - eff_pre_bank)
+    # 🌱 Banco de semillas inicial (sin penalización)
+    Sq = float(seed_bank0)
+
 
     EPS = 1e-9
     TTw = 0.0
