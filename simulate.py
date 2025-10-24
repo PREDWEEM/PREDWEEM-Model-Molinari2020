@@ -169,12 +169,7 @@ def simulate_with_controls(
     PC_ini = dt.date(sow.year, 10, 8)
     PC_fin = dt.date(sow.year, 11, 4)
 
-    # -------- AUC base (WC sin ponderar) — trapezoidal
-    wc = df["WC"].to_numpy()
-    auc_running = np.concatenate(([0.0], np.cumsum(0.5*(wc[1:] + wc[:-1]))))
-    df["AUC_base"] = auc_running
-    df.attrs["AUC_base_final"] = float(df["AUC_base"].iloc[-1])
-
+  
     # -------- Pérdida diaria con sensibilidad ×5 SOLO en PC
     def _loss(x, alpha, Lmax): 
         x = float(max(x,0.0))
