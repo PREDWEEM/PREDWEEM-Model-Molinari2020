@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 # ===============================================================
-# 🌾 WeedCropSystem — v3.10 (Optimización de fechas con reglas)
+# 🌾 WeedCropSystem — v3.12 (Reglas fenológicas reales + Optimización)
 # ---------------------------------------------------------------
-# - Base: v3.9.1 (una especie, emergencia ×8, curva de pérdida α/Lmax)
-# - NUEVO: Optimizador de fechas de aplicación (grid/aleatorio)
-# - Reglas exactas (como PREDWEEM):
-#   · preR: SOLO ≤ siembra−14 (actúa S1–S2; residual)
-#   · preemR: [siembra, siembra+10] (S1–S2; residual)
-#   · postR: ≥ siembra+20 (S1–S4; residual)
-#   · gram: [siembra, siembra+10] (S1–S3; ventana de 11 días: día de app + 10)
-# - Gateo por remanente + exclusión jerárquica (99%) por DÍA:
-#   preR → preemR → postR → gram
+# - Una única especie
+# - Emergencia intensificada ×8
+# - Pérdida de rinde: α/Lmax fijos
+# - Gateo por remanente + exclusión jerárquica (99%) por DÍA
+# - Ventanas agronómicas:
+#   · preR: entre 30 y 14 días antes de siembra
+#   · preemR: entre siembra y emergencia del cultivo (~+10 d)
+#   · postR: desde 2 hojas (~+20 d) hasta fin del ciclo
+#   · gram: entre 3 y 4 hojas (~+25 a +35 d)
 # ===============================================================
 
 import sys, datetime as dt
 import numpy as np
 import pandas as pd
 
-# =========================
-# Núcleo de simulación base
-# =========================
+# ===============================================================
+# 🌦️ Núcleo de simulación
+# ===============================================================
 def synthetic_meteo(start, end, seed=42):
     rng = np.random.default_rng(int(seed))
     dates = pd.date_range(start, end, freq="D")
@@ -51,93 +51,61 @@ def ciec_calendar(days_since_sow, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca):
     Ciec = min((LAI / max(float(LAI_hc),1e-6)) * ratio, 1.0)
     return float(Ciec), LAI
 
-# Helpers de ventanas (incluye preemR y regla gram con +10 días)
 def _date_range(start_date, days):
     return {start_date + dt.timedelta(days=i) for i in range(int(days))}
 
-def _one_day(date):
-    return {date}
-
-# ================================
-# Simulador con reglas de control
-# ================================
+# ===============================================================
+# 🧩 Simulación con controles y reglas fenológicas
+# ===============================================================
 def simulate_with_controls(
-    # agronomía/ambiente
     nyears=1, seed_bank0=4500, K=250, Tb=0.0, seed=42,
     sow_date=dt.date(2025,6,1),
-    # canopia / competencia
     LAI_max=6.0, t_lag=10, t_close=35, LAI_hc=6.0, Cs=200, Ca=200,
     p_S1=1.0, p_S2=0.6, p_S3=0.4, p_S4=0.2,
-    # pesos de WC
     w_S1=0.15, w_S2=0.30, w_S3=0.60, w_S4=1.00,
-    # pérdida de rinde
     alpha=0.9782, Lmax=83.77, GY_pot=6000.0,
-    # eficacia fija (usuario puede cambiarlas en UI si desea)
     preR_eff=90, preemR_eff=70, postR_eff=85, gram_eff=80,
-    # residualidades (días)
     preR_residual=30, preemR_residual=30, postR_residual=30, gram_residual_forward=11,
-    # FECHAS (pueden ser None si no se aplican)
     preR_date=None, preemR_date=None, postR_date=None, gram_date=None,
-    # validación de reglas (apagar para escenarios libres)
     enforce_rules=True
 ):
-    EPS_REMAIN = 1e-9
-    EPS_EXCLUDE = 0.99
-
     sow = pd.to_datetime(sow_date).date()
     start = sow - dt.timedelta(days=90)
     end = dt.date(sow.year + int(nyears) - 1, 12, 1)
     meteo = synthetic_meteo(start, end, seed)
 
-       # ===============================================================
-    # 🔍 Validación de reglas de aplicación (v3.12 — reglas fenológicas reales)
     # ===============================================================
-    # Definición de ventanas según la siembra (sow_date) y desarrollo térmico estimado:
-    # - PreR: entre 30 y 14 días antes de la siembra
-    # - PreemR: entre siembra y emergencia del cultivo (≈ +200 °Cd ≈ 7–10 días)
-    # - PostR: desde 2 hojas del cultivo (≈ +300 °Cd ≈ +15–20 días)
-    # - Gram: entre 3 y 4 hojas (≈ +400 °Cd ≈ +20–25 días)
-    #
-    # Nota: los límites fenológicos se aproximan en días calendario a partir de siembra.
-
-    # Límite inferior y superior de cada ventana (en días relativos)
+    # 🌱 Ventanas fenológicas reales de aplicación
+    # ===============================================================
     preR_start  = sow - dt.timedelta(days=30)
     preR_end    = sow - dt.timedelta(days=14)
     preemR_start = sow
-    preemR_end   = sow + dt.timedelta(days=10)      # hasta emergencia del cultivo
-    postR_start  = sow + dt.timedelta(days=20)      # ≈ 2 hojas
-    postR_end    = sow + dt.timedelta(days=180)     # hasta fin de ciclo
-    gram_start   = sow + dt.timedelta(days=25)      # 3 hojas
-    gram_end     = sow + dt.timedelta(days=35)      # 4 hojas
+    preemR_end   = sow + dt.timedelta(days=10)
+    postR_start  = sow + dt.timedelta(days=20)
+    postR_end    = sow + dt.timedelta(days=180)
+    gram_start   = sow + dt.timedelta(days=25)
+    gram_end     = sow + dt.timedelta(days=35)
 
-    # ====== Validación de reglas ======
     if enforce_rules:
-        if preR_date is not None and not (preR_start <= preR_date <= preR_end):
-            return None
-        if preemR_date is not None and not (preemR_start <= preemR_date <= preemR_end):
-            return None
-        if postR_date is not None and not (postR_start <= postR_date <= postR_end):
-            return None
-        if gram_date is not None and not (gram_start <= gram_date <= gram_end):
-            return None
+        if preR_date is not None and not (preR_start <= preR_date <= preR_end): return None
+        if preemR_date is not None and not (preemR_start <= preemR_date <= preemR_end): return None
+        if postR_date is not None and not (postR_start <= postR_date <= postR_end): return None
+        if gram_date is not None and not (gram_start <= gram_date <= gram_end): return None
 
-    # Ventanas (sets de fechas) según duración residual
     preR_window   = set() if preR_date is None else _date_range(preR_date, preR_residual)
     preemR_window = set() if preemR_date is None else _date_range(preemR_date, preemR_residual)
     postR_window  = set() if postR_date is None else _date_range(postR_date, postR_residual)
     gram_window   = set() if gram_date is None else _date_range(gram_date, gram_residual_forward)
 
-
-    # Ventanas (sets de fechas)
-    preR_window   = set() if preR_date is None else _date_range(preR_date, preR_residual)
-    preemR_window = set() if preemR_date is None else _date_range(preemR_date, preemR_residual)
-    postR_window  = set() if postR_date is None else _date_range(postR_date, postR_residual)
-    gram_window   = set() if gram_date is None else _date_range(gram_date, gram_residual_forward)
-
+    # ===============================================================
+    # 🔄 Dinámica diaria
+    # ===============================================================
+    EPS_REMAIN = 1e-9
+    EPS_EXCLUDE = 0.99
     Sq = float(seed_bank0)
     TTw = 0.0
     W = [0,0,0,0,0]  # S1..S5
-    Th = [70, 280, 400, 300]  # umbrales de pasaje por TT
+    Th = [70, 280, 400, 300]  # TT para transición
     out = []
 
     for _, row in meteo.iterrows():
@@ -147,106 +115,79 @@ def simulate_with_controls(
         TTw += max(Tmean - float(Tb), 0)
 
         Ciec_t, LAI_t = ciec_calendar(dss, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca)
-
-        # Emergencia ×8 para efecto visible
         E_t = 8.0 * emergence_simple(TTw, float(row["prec"]))
-
-        # Población efectiva (intra-específica) + supresión
         Wk = sum(np.array(W)*np.array([0.15,0.3,0.6,1.0,0.0]))
         surv_intra = 1 - min(Wk/K,1)
-
-        # Ingreso a S1 (afectado por supresión S1)
         sup_S1 = (1-Ciec_t)**p_S1
         I1_t = max(0, Sq * E_t * surv_intra * sup_S1)
 
-        # --- Copia controlable de estados (antes de aplicar controles del día) ---
-        Wc = W.copy()  # Wc[0..4] → S1..S5 (control del día)
-        # Supresión por canopia (S2..S4)
+        Wc = W.copy()
         Wc[1] *= (1-Ciec_t)**p_S2
         Wc[2] *= (1-Ciec_t)**p_S3
         Wc[3] *= (1-Ciec_t)**p_S4
 
-        # ---------- Gateo por remanente + exclusión jerárquica (diario) ----------
-        eff_accum = 0.0  # acumulador jerárquico del día (0..1)
-
+        eff_accum = 0.0
         def _rem_in(states):
-            tot = 0.0
-            if "S1" in states: tot += Wc[0]
-            if "S2" in states: tot += Wc[1]
-            if "S3" in states: tot += Wc[2]
-            if "S4" in states: tot += Wc[3]
-            return float(tot)
-
+            return sum(Wc[i] for i,s in enumerate(["S1","S2","S3","S4"]) if s in states)
         def _apply_eff(eff_pct, states):
             nonlocal eff_accum
-            if eff_pct <= 0: return
-            if eff_accum >= EPS_EXCLUDE: return
+            if eff_pct <= 0 or eff_accum >= EPS_EXCLUDE: return
             rem = _rem_in(states)
             if rem <= EPS_REMAIN: return
             f = max(0.0, 1.0 - (eff_pct/100.0))
-            # aplicar reducción a los estados seleccionados
-            if "S1" in states: Wc[0] *= f
-            if "S2" in states: Wc[1] *= f
-            if "S3" in states: Wc[2] *= f
-            if "S4" in states: Wc[3] *= f
-            # combinar eficacias como independencia: 1-(1-a)(1-b)...
-            eff_accum = 1.0 - (1.0 - eff_accum) * (1.0 - eff_pct/100.0)
+            for i,s in enumerate(["S1","S2","S3","S4"]):
+                if s in states: Wc[i] *= f
+            eff_accum = 1.0 - (1.0 - eff_accum)*(1.0 - eff_pct/100.0)
 
-        # Aplicación por orden jerárquico SOLO si el día cae en su ventana:
         if date in preR_window:   _apply_eff(preR_eff,   ["S1","S2"])
         if date in preemR_window: _apply_eff(preemR_eff, ["S1","S2"])
         if date in postR_window:  _apply_eff(postR_eff,  ["S1","S2","S3","S4"])
         if date in gram_window:   _apply_eff(gram_eff,   ["S1","S2","S3"])
 
-        # ---------- Transiciones fenológicas (usando W controlado + I1_t) ----------
         O1 = I1_t if TTw>=Th[0] else 0
         O2 = Wc[1] if TTw>=sum(Th[:2]) else 0
         O3 = Wc[2] if TTw>=sum(Th[:3]) else 0
         O4 = Wc[3] if TTw>=sum(Th[:4]) else 0
-
-        W1 = max(0, Wc[0] + I1_t - O1)
-        W2 = max(0, Wc[1] + O1   - O2)
-        W3 = max(0, Wc[2] + O2   - O3)
-        W4 = max(0, Wc[3] + O3   - O4)
-        W5 = max(0, Wc[4] + O4)
-
+        W1 = max(0, Wc[0]+I1_t-O1)
+        W2 = max(0, Wc[1]+O1-O2)
+        W3 = max(0, Wc[2]+O2-O3)
+        W4 = max(0, Wc[3]+O3-O4)
+        W5 = max(0, Wc[4]+O4)
         W = [W1,W2,W3,W4,W5]
-
-        out.append({
-            "date":date,"days_since_sow":dss,"TTw":TTw,"Ciec":Ciec_t,"LAI":LAI_t,
-            "W1":W1,"W2":W2,"W3":W3,"W4":W4,"W5":W5
-        })
+        out.append({"date":date,"days_since_sow":dss,"TTw":TTw,"Ciec":Ciec_t,"LAI":LAI_t,
+                    "W1":W1,"W2":W2,"W3":W3,"W4":W4,"W5":W5})
 
     df = pd.DataFrame(out)
-    df["W_total"] = df[["W1","W2","W3","W4"]].sum(axis=1)
-    df["WC"] = w_S1*df["W1"] + w_S2*df["W2"] + w_S3*df["W3"] + w_S4*df["W4"]
-    df["Yield_loss_%"] = (alpha*df["WC"])/(1+(alpha*df["WC"]/Lmax))
-    df["Yield_relative_%"] = 100 - df["Yield_loss_%"]
-    df["Yield_abs_kg_ha"] = GY_pot * (df["Yield_relative_%"]/100)
+    df["W_total"]=df[["W1","W2","W3","W4"]].sum(axis=1)
+    df["WC"]=w_S1*df["W1"]+w_S2*df["W2"]+w_S3*df["W3"]+w_S4*df["W4"]
+    df["Yield_loss_%"]=(alpha*df["WC"])/(1+(alpha*df["WC"]/Lmax))
+    df["Yield_relative_%"]=100-df["Yield_loss_%"]
+    df["Yield_abs_kg_ha"]=GY_pot*(df["Yield_relative_%"]/100)
     return df
 
-# ===============================================
-# Objetivo para optimización (minimizar pérdida %)
-# ===============================================
+# ===============================================================
+# 🎯 Función objetivo para optimización
+# ===============================================================
 def objective_loss(params, base_kwargs):
-    """ params: dict con fechas (o None) y residualidades (enteros).
-        base_kwargs: argumentos fijos (sow_date, LAI, etc.). """
     sim = simulate_with_controls(**base_kwargs, **params)
     if sim is None or sim.empty:
         return np.inf
     return float(sim["Yield_loss_%"].iloc[-1])
 
-# ============================
-# --------- STREAMLIT --------
-# ============================
+# ===============================================================
+# 🖥️ STREAMLIT APP
+# ===============================================================
 if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
     import streamlit as st
     import plotly.graph_objects as go
+    import itertools, random
 
-    st.set_page_config(page_title="WeedCropSystem v3.10", layout="wide")
-    st.title("🌾 WeedCropSystem — v3.10 (Optimización de fechas con reglas)")
+    st.set_page_config(page_title="WeedCropSystem v3.12", layout="wide")
+    st.title("🌾 WeedCropSystem — v3.12 (Reglas fenológicas reales + Optimización)")
 
-    # ----- Panel lateral: parámetros base -----
+    # -------------------------------------------------------------
+    # Panel lateral
+    # -------------------------------------------------------------
     st.sidebar.header("Escenario base")
     nyears = st.sidebar.slider("Años a simular", 1, 3, 1)
     seed_bank0 = st.sidebar.number_input("Banco inicial (semillas·m⁻²)", 0, 50000, 4500)
@@ -260,8 +201,8 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
     t_lag=st.sidebar.slider("t_lag",0,60,10)
     t_close=st.sidebar.slider("t_close",10,100,35)
     LAI_hc=st.sidebar.slider("LAI_hc",2.0,10.0,6.0,0.1)
-    Cs=st.sidebar.number_input("Cs (pl/m²)",50,800,200)
-    Ca=st.sidebar.number_input("Ca (pl/m²)",30,800,200)
+    Cs=st.sidebar.number_input("Cs",50,800,200)
+    Ca=st.sidebar.number_input("Ca",30,800,200)
 
     st.sidebar.subheader("⚖️ Supresión (exp de (1−Ciec))")
     p_S1=st.sidebar.slider("S1",0.0,2.0,1.0,0.1)
@@ -269,124 +210,157 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
     p_S3=st.sidebar.slider("S3",0.0,2.0,0.4,0.1)
     p_S4=st.sidebar.slider("S4",0.0,2.0,0.2,0.1)
 
-    st.sidebar.subheader("🌾 Rinde potencial y pérdida")
-    gy_option = st.sidebar.selectbox("Cultivo:", ["Trigo (6000 kg/ha)","Cebada (7000 kg/ha)","Personalizado"])
-    GY_pot = 6000.0 if "Trigo" in gy_option else (7000.0 if "Cebada" in gy_option else st.sidebar.number_input("GY_pot (kg/ha)", 1000, 15000, 6000, 100))
-    alpha=0.9782; Lmax=83.77
+    st.sidebar.subheader("🌾 Rinde potencial")
+    GY_pot = 6000.0
+    alpha, Lmax = 0.9782, 83.77
 
     st.sidebar.divider()
     st.sidebar.header("Eficacias fijas (%)")
-    preR_eff = st.sidebar.slider("preR (S1–S2)", 0, 100, 90, 1)
-    preemR_eff = st.sidebar.slider("preemR (S1–S2)", 0, 100, 70, 1)
-    postR_eff = st.sidebar.slider("postR (S1–S4)", 0, 100, 85, 1)
-    gram_eff = st.sidebar.slider("gram (S1–S3)", 0, 100, 80, 1)
+    preR_eff = st.sidebar.slider("preR (S1–S2)", 0, 100, 90)
+    preemR_eff = st.sidebar.slider("preemR (S1–S2)", 0, 100, 70)
+    postR_eff = st.sidebar.slider("postR (S1–S4)", 0, 100, 85)
+    gram_eff = st.sidebar.slider("gram (S1–S3)", 0, 100, 80)
 
     st.sidebar.header("Residualidades (días)")
-    preR_residual = st.sidebar.slider("preR residual", 10, 180, 30, 1)
-    preemR_residual = st.sidebar.slider("preemR residual", 10, 180, 30, 1)
-    postR_residual = st.sidebar.slider("postR residual", 10, 180, 30, 1)
-    gram_residual_forward = 11  # fijo por regla (día de app +10)
+    preR_residual = st.sidebar.slider("preR residual", 10, 180, 30)
+    preemR_residual = st.sidebar.slider("preemR residual", 10, 180, 30)
+    postR_residual = st.sidebar.slider("postR residual", 10, 180, 30)
+    gram_residual_forward = 11
 
-    # =======================
-    # MODO: Simular u Optimizar
-    # =======================
-    mode = st.sidebar.selectbox("Modo:", ["Simulación única", "Optimización (fechas)"], index=0)
+    mode = st.sidebar.selectbox("Modo", ["Simulación única", "Optimización (fechas)"])
 
     base_kwargs = dict(
         nyears=nyears, seed_bank0=seed_bank0, K=K, Tb=Tb, seed=sim_seed,
         sow_date=sow_date, LAI_max=LAI_max, t_lag=t_lag, t_close=t_close,
         LAI_hc=LAI_hc, Cs=Cs, Ca=Ca, p_S1=p_S1, p_S2=p_S2, p_S3=p_S3, p_S4=p_S4,
-        w_S1=0.15, w_S2=0.30, w_S3=0.60, w_S4=1.00,
         alpha=alpha, Lmax=Lmax, GY_pot=GY_pot,
         preR_eff=preR_eff, preemR_eff=preemR_eff, postR_eff=postR_eff, gram_eff=gram_eff,
         preR_residual=preR_residual, preemR_residual=preemR_residual, postR_residual=postR_residual,
-        gram_residual_forward=gram_residual_forward,
-        enforce_rules=True
+        gram_residual_forward=gram_residual_forward, enforce_rules=True
     )
 
-    # =======================
-    # --- SIMULACIÓN ÚNICA ---
-    # =======================
+    # -------------------------------------------------------------
+    # 🔹 Simulación única
+    # -------------------------------------------------------------
     if mode == "Simulación única":
-        st.sidebar.subheader("Fechas de aplicación (opcionales)")
-        preR_date = st.sidebar.date_input("preR (≤ siembra−14)", value=None, min_value=sow_date-dt.timedelta(days=180), max_value=sow_date, key="preR") if st.sidebar.checkbox("Usar preR", False) else None
-        preemR_date = st.sidebar.date_input("preemR [siembra..siembra+10]", value=sow_date, min_value=sow_date, max_value=sow_date+dt.timedelta(days=10), key="preemR") if st.sidebar.checkbox("Usar preemR", False) else None
-        postR_date = st.sidebar.date_input("postR (≥ siembra+20)", value=sow_date+dt.timedelta(days=20), min_value=sow_date+dt.timedelta(days=20), max_value=sow_date+dt.timedelta(days=180), key="postR") if st.sidebar.checkbox("Usar postR", False) else None
-        gram_date = st.sidebar.date_input("gram [siembra..siembra+10]", value=sow_date, min_value=sow_date, max_value=sow_date+dt.timedelta(days=10), key="gram") if st.sidebar.checkbox("Usar gram", False) else None
+        st.sidebar.subheader("Fechas (opcionales, cumplen reglas)")
+        use_preR   = st.sidebar.checkbox("Usar preR", False)
+        use_preemR = st.sidebar.checkbox("Usar preemR", False)
+        use_postR  = st.sidebar.checkbox("Usar postR", False)
+        use_gram   = st.sidebar.checkbox("Usar gram", False)
+
+        preR_date = (st.sidebar.date_input("preR (−30 a −14)",
+                                           min_value=sow_date - dt.timedelta(days=60),
+                                           max_value=sow_date,
+                                           value=sow_date - dt.timedelta(days=21))
+                     if use_preR else None)
+        preemR_date = (st.sidebar.date_input("preemR (0 a +10)",
+                                             min_value=sow_date,
+                                             max_value=sow_date + dt.timedelta(days=10),
+                                             value=sow_date)
+                       if use_preemR else None)
+        postR_date = (st.sidebar.date_input("postR (≥ +20)",
+                                            min_value=sow_date + dt.timedelta(days=20),
+                                            max_value=sow_date + dt.timedelta(days=180),
+                                            value=sow_date + dt.timedelta(days=30))
+                      if use_postR else None)
+        gram_date = (st.sidebar.date_input("gram (+25 a +35)",
+                                           min_value=sow_date + dt.timedelta(days=25),
+                                           max_value=sow_date + dt.timedelta(days=35),
+                                           value=sow_date + dt.timedelta(days=28))
+                     if use_gram else None)
 
         if st.sidebar.button("▶ Ejecutar simulación"):
-            df = simulate_with_controls(**base_kwargs,
-                                        preR_date=preR_date, preemR_date=preemR_date,
-                                        postR_date=postR_date, gram_date=gram_date)
+            df = simulate_with_controls(**base_kwargs, preR_date=preR_date,
+                                        preemR_date=preemR_date, postR_date=postR_date,
+                                        gram_date=gram_date)
             if df is None or df.empty:
-                st.error("Configuración inválida con las reglas de fechas.")
+                st.error("Configuración inválida según reglas fenológicas.")
             else:
                 st.success(f"Simulación OK — {len(df)} días")
-                fig1 = go.Figure()
-                fig1.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
-                fig1.add_trace(go.Scatter(x=df["date"], y=df["Yield_loss_%"], name="Pérdida (%)", yaxis="y2"))
-                fig1.update_layout(title="Rinde y Pérdida (%)", xaxis_title="Fecha",
-                                   yaxis_title="Rinde (kg/ha)",
-                                   yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"),
-                                   template="plotly_white")
-                st.plotly_chart(fig1, use_container_width=True)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
+                fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_loss_%"], name="Pérdida (%)", yaxis="y2"))
+                fig.update_layout(title="Rinde y Pérdida (%)",
+                                  xaxis_title="Fecha",
+                                  yaxis_title="Rinde (kg/ha)",
+                                  yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"),
+                                  template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
                 st.metric("💰 Rinde final (kg/ha)", f"{df['Yield_abs_kg_ha'].iloc[-1]:.0f}")
                 st.metric("🧮 Pérdida final (%)", f"{df['Yield_loss_%'].iloc[-1]:.1f}")
-                st.download_button("📥 CSV", df.to_csv(index=False).encode(), "simulacion_v310.csv","text/csv")
+                st.download_button("📥 CSV", df.to_csv(index=False).encode(), "simulacion_v312.csv","text/csv")
 
-    # =====================
-    # --- OPTIMIZACIÓN  ---
-    # =====================
+    # -------------------------------------------------------------
+    # 🔸 Optimización de fechas
+    # -------------------------------------------------------------
     else:
         st.sidebar.header("Espacio de búsqueda (fechas)")
-        preR_enable = st.sidebar.checkbox("Optimizar preR (≤ siembra−14)", True)
-        preemR_enable = st.sidebar.checkbox("Optimizar preemR [siembra..siembra+10]", True)
-        postR_enable = st.sidebar.checkbox("Optimizar postR (≥ siembra+20)", True)
-        gram_enable = st.sidebar.checkbox("Optimizar gram [siembra..siembra+10]", True)
+        preR_enable   = st.sidebar.checkbox("Optimizar preR (−30 a −14)", True)
+        preemR_enable = st.sidebar.checkbox("Optimizar preemR (0 a +10)", True)
+        postR_enable  = st.sidebar.checkbox("Optimizar postR (≥ +20)", True)
+        gram_enable   = st.sidebar.checkbox("Optimizar gram (+25 a +35)", True)
 
-        step_preR = st.sidebar.number_input("Paso preR (días)", 1, 30, 7, 1)
-        step_preem = st.sidebar.number_input("Paso preemR (días)", 1, 10, 3, 1)
-        step_postR = st.sidebar.number_input("Paso postR (días)", 1, 30, 7, 1)
-        step_gram = st.sidebar.number_input("Paso gram (días)", 1, 10, 3, 1)
-
-        max_evals = st.sidebar.number_input("Máx. escenarios a evaluar", 10, 20000, 2000, 10)
+        resol = st.sidebar.selectbox("Resolución", ["Fina","Media","Gruesa"], index=1)
         search_mode = st.sidebar.selectbox("Estrategia", ["Grid (completo)", "Muestreo aleatorio"], index=0)
-        run_opt = st.sidebar.button("🚀 Ejecutar optimización")
+        max_evals = st.sidebar.number_input("Máx. escenarios a evaluar", 10, 20000, 2000, 10)
 
-        def _candidates_preR():
-            # desde siembra-180 hasta siembra-14, step_preR
+        # Helpers de candidatos con reglas fenológicas reales
+        def _candidates_preR(step):
             dates = []
-            cur = sow_date - dt.timedelta(days=180)
+            cur = sow_date - dt.timedelta(days=30)
             end = sow_date - dt.timedelta(days=14)
             while cur <= end:
                 dates.append(cur)
-                cur += dt.timedelta(days=int(step_preR))
+                cur += dt.timedelta(days=int(step))
             return dates
 
-        def _candidates_preemR():
-            return [sow_date + dt.timedelta(days=d) for d in range(0, 11, int(step_preem)) if 0 <= d <= 10]
+        def _candidates_preemR(step):
+            return [sow_date + dt.timedelta(days=d) for d in range(0, 11, int(step)) if 0 <= d <= 10]
 
-        def _candidates_postR():
+        def _candidates_postR(step):
             dates=[]
             cur = sow_date + dt.timedelta(days=20)
             end = sow_date + dt.timedelta(days=180)
             while cur <= end:
                 dates.append(cur)
-                cur += dt.timedelta(days=int(step_postR))
+                cur += dt.timedelta(days=int(step))
             return dates
 
-        def _candidates_gram():
-            return [sow_date + dt.timedelta(days=d) for d in range(0, 11, int(step_gram)) if 0 <= d <= 10]
+        def _candidates_gram(step):
+            dates=[]
+            cur = sow_date + dt.timedelta(days=25)
+            end = sow_date + dt.timedelta(days=35)
+            while cur <= end:
+                dates.append(cur)
+                cur += dt.timedelta(days=int(step))
+            return dates
+
+        run_opt = st.sidebar.button("🚀 Ejecutar optimización")
 
         if run_opt:
-            import itertools, random
-            preR_list   = _candidates_preR()   if preR_enable   else [None]
-            preem_list  = _candidates_preemR() if preemR_enable else [None]
-            postR_list  = _candidates_postR()  if postR_enable  else [None]
-            gram_list   = _candidates_gram()   if gram_enable   else [None]
+            # Paso según resolución (solo al ejecutar)
+            if resol == "Fina":
+                step_preR, step_preem, step_postR, step_gram = 3, 2, 5, 2
+            elif resol == "Media":
+                step_preR, step_preem, step_postR, step_gram = 7, 4, 10, 5
+            else:
+                step_preR, step_preem, step_postR, step_gram = 14, 6, 20, 10
+
+            preR_list   = _candidates_preR(step_preR)    if preR_enable   else [None]
+            preem_list  = _candidates_preemR(step_preem) if preemR_enable else [None]
+            postR_list  = _candidates_postR(step_postR)  if postR_enable  else [None]
+            gram_list   = _candidates_gram(step_gram)    if gram_enable   else [None]
+
+            # Estimación de combinaciones
+            n_preR  = len(preR_list)   if preR_enable   else 1
+            n_preem = len(preem_list)  if preemR_enable else 1
+            n_postR = len(postR_list)  if postR_enable  else 1
+            n_gram  = len(gram_list)   if gram_enable   else 1
+            n_total = n_preR * n_preem * n_postR * n_gram
+            st.info(f"🧮 Se evaluarán hasta **{min(n_total, max_evals):,}** combinaciones (de {n_total:,} posibles).")
 
             combos = list(itertools.product(preR_list, preem_list, postR_list, gram_list))
-
             if search_mode.startswith("Muestreo"):
                 random.seed(123)
                 if len(combos) > max_evals:
@@ -401,9 +375,9 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
             for i,(d_preR, d_preem, d_postR, d_gram) in enumerate(combos, 1):
                 params = dict(preR_date=d_preR, preemR_date=d_preem, postR_date=d_postR, gram_date=d_gram)
                 loss = objective_loss(params, base_kwargs)
-                if loss != np.inf:
+                if np.isfinite(loss):
                     results.append({"preR":d_preR, "preemR":d_preem, "postR":d_postR, "gram":d_gram, "loss_pct":loss})
-                if i % max(1, len(combos)//100) == 0:
+                if i % max(1, len(combos)//100) == 0 or i == len(combos):
                     prog.progress(min(1.0, i/len(combos)))
             prog.progress(1.0)
 
@@ -419,7 +393,7 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
                 with c2:
                     st.download_button("📥 Descargar tabla completa (CSV)",
                                        res_df.to_csv(index=False).encode(),
-                                       "opt_fechas_resultados.csv","text/csv")
+                                       "opt_fechas_resultados_v312.csv","text/csv")
 
                 # Re-simular mejor
                 df_best = simulate_with_controls(**base_kwargs,
@@ -440,6 +414,6 @@ if "streamlit" in sys.modules or any("streamlit" in arg for arg in sys.argv):
                     st.metric("🧮 Pérdida final (%)", f"{df_best['Yield_loss_%'].iloc[-1]:.1f}")
                     st.download_button("📥 CSV (mejor escenario)",
                                        df_best.to_csv(index=False).encode(),
-                                       "simulacion_mejor_escenario_v310.csv","text/csv")
+                                       "simulacion_mejor_escenario_v312.csv","text/csv")
         else:
-            st.info("Ajustá el espacio de búsqueda y presioná “Ejecutar optimización”.")
+            st.info("Ajustá el espacio de búsqueda y presioná **Ejecutar optimización**.")
