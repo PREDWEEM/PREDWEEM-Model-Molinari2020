@@ -3,13 +3,12 @@
 # 🌾 WeedCropSystem — Streamlit (Molinari et al. 2020)
 # ---------------------------------------------------------------
 # Simulación diaria con controles herbicidas (modo simple)
+# - Fecha de siembra seleccionable
 # - Banco de semillas (Eq.1)
 # - Emergencia (placeholder ANN)
 # - Fenología / TT (Eq.4–6)
 # - Competencia intra e interespecífica (Eq.7–9)
 # - Control químico (Eq.14)
-# ---------------------------------------------------------------
-# Requiere: streamlit, numpy, pandas, plotly
 # ===============================================================
 
 import streamlit as st
@@ -22,7 +21,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="🌾 WeedCropSystem — Controles herbicidas", layout="wide")
 st.title("🌾 WeedCropSystem — Simulación con controles herbicidas (modo simple)")
 
-# ---------- SIDEBAR ----------
+# ---------- PANEL LATERAL ----------
 st.sidebar.header("Configuración del escenario")
 nyears = st.sidebar.slider("Años a simular", 1, 10, 3)
 seed_bank0 = st.sidebar.number_input("Banco inicial (semillas · m⁻²)", 0, 10000, 4500)
@@ -30,6 +29,12 @@ Tb = st.sidebar.number_input("Temp. base Tb (°C)", 0.0, 10.0, 0.0)
 K = st.sidebar.number_input("Capacidad de carga K (pl · m⁻²)", 50, 1000, 250)
 sim_seed = st.sidebar.number_input("Semilla aleatoria", 0, 9999, 42)
 
+# ---------- NUEVO: FECHA DE SIEMBRA ----------
+st.sidebar.divider()
+st.sidebar.subheader("📅 Fechas del cultivo")
+sow_date = st.sidebar.date_input("Fecha de siembra", dt.date(2025, 6, 1))
+
+# ---------- CONTROLES HERBICIDAS ----------
 st.sidebar.divider()
 st.sidebar.subheader("🧪 Controles herbicidas (modo simple)")
 
@@ -39,7 +44,7 @@ preR_days_before = st.sidebar.number_input("Días antes de siembra", 0, 30, 14)
 preR_eff_S1S2 = st.sidebar.slider("Eficacia S1–S2 (%)", 0, 100, 90)
 preR_residual = st.sidebar.slider("Duración residual (días)", 0, 60, 30)
 
-# --- Preemergente / post temprana ---
+# --- Postemergente ---
 st.sidebar.markdown("**Preemergente / Postemergente (postR)**")
 postR_days_after = st.sidebar.number_input("Días después de siembra", 0, 60, 25)
 postR_eff_S1S4 = st.sidebar.slider("Eficacia S1–S4 (%)", 0, 100, 85)
@@ -72,16 +77,17 @@ def Ciec_simple(TT_c, Cs=200, Ca=200, LAI_hc=6.0):
     LAI = max(0, 0.008*TT_c - 0.000004*(TT_c**2))
     return min((LAI/LAI_hc)*(Cs/Ca), 1.0), LAI
 
-# ---------- SIMULACIÓN PRINCIPAL ----------
+# ---------- SIMULADOR PRINCIPAL ----------
 def simulate(nyears=3, seed_bank0=4500, K=250, Tb=0.0, seed=42,
              preR_days_before=14, preR_eff=90, preR_residual=30,
              postR_days_after=25, postR_eff=85,
-             gram_days_after=10, gram_eff=80):
+             gram_days_after=10, gram_eff=80,
+             sow_date=dt.date(2025,6,1)):
 
-    start_year = 2021
-    sow = dt.date(start_year,6,1)
+    start_year = sow_date.year
+    sow = sow_date
     start = sow - dt.timedelta(days=preR_days_before)
-    end = dt.date(start_year+nyears-1,12,1)
+    end = dt.date(start_year+nyears-1, 12, 1)
     meteo = synthetic_meteo(start, end, seed)
 
     Sq = seed_bank0
@@ -89,7 +95,7 @@ def simulate(nyears=3, seed_bank0=4500, K=250, Tb=0.0, seed=42,
     W = [0,0,0,0,0]
     out = []
 
-    # Fechas de control absolutas
+    # Fechas absolutas de control
     preR_date = sow - dt.timedelta(days=preR_days_before)
     postR_date = sow + dt.timedelta(days=postR_days_after)
     gram_date = sow + dt.timedelta(days=gram_days_after)
@@ -126,11 +132,11 @@ def simulate(nyears=3, seed_bank0=4500, K=250, Tb=0.0, seed=42,
         # Mortalidad por controles post y graminicida
         Ct_post = [0,0,0,0,0]
         if date == postR_date:
-            Ct_post = [postR_eff/100]*4 + [0]  # actúa S1–S4
+            Ct_post = [postR_eff/100]*4 + [0]
         if date == gram_date:
-            Ct_post = [gram_eff/100]*3 + [0,0] # actúa S1–S3
+            Ct_post = [gram_eff/100]*3 + [0,0]
 
-        # Aplicar mortalidad (Eq.14)
+        # Aplicar mortalidad
         W_ctrl = [w*(1-c) for w,c in zip(W,Ct_post)]
 
         # Actualización de estados
@@ -154,9 +160,10 @@ if run_btn:
     df = simulate(nyears, seed_bank0, K, Tb, sim_seed,
                   preR_days_before, preR_eff_S1S2, preR_residual,
                   postR_days_after, postR_eff_S1S4,
-                  gram_days_after, gram_eff_S1S3)
+                  gram_days_after, gram_eff_S1S3,
+                  sow_date)
 
-    st.success(f"Simulación completada ({len(df)} días)")
+    st.success(f"Simulación completada ({len(df)} días desde {sow_date})")
 
     # --- Gráficos ---
     tab1, tab2, tab3 = st.tabs(["Densidades S1–S5","Supresión y Emergencia","Controles y Datos"])
@@ -182,10 +189,10 @@ if run_btn:
         st.plotly_chart(fig2, use_container_width=True)
 
     with tab3:
-        st.write("🧪 **Aplicaciones herbicidas**:")
-        st.markdown(f"- Presiembra residual: {preR_eff_S1S2}% (duración {preR_residual} d) desde **{(dt.date(2021,6,1)-dt.timedelta(days=preR_days_before)).isoformat()}**")
-        st.markdown(f"- Postemergente: {postR_eff_S1S4}% el **{(dt.date(2021,6,1)+dt.timedelta(days=postR_days_after)).isoformat()}**")
-        st.markdown(f"- Graminicida: {gram_eff_S1S3}% el **{(dt.date(2021,6,1)+dt.timedelta(days=gram_days_after)).isoformat()}**")
+        st.write("🧪 **Aplicaciones herbicidas:**")
+        st.markdown(f"- **Presiembra residual:** {preR_eff_S1S2}% (duración {preR_residual} d) desde **{(sow_date - dt.timedelta(days=preR_days_before)).isoformat()}**")
+        st.markdown(f"- **Postemergente:** {postR_eff_S1S4}% el **{(sow_date + dt.timedelta(days=postR_days_after)).isoformat()}**")
+        st.markdown(f"- **Graminicida:** {gram_eff_S1S3}% el **{(sow_date + dt.timedelta(days=gram_days_after)).isoformat()}**")
 
         st.dataframe(df.tail(50), use_container_width=True)
         csv = df.to_csv(index=False).encode()
