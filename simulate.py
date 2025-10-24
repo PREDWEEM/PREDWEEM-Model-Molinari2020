@@ -89,16 +89,44 @@ def simulate_with_controls(
     end = dt.date(sow.year + int(nyears) - 1, 12, 1)
     meteo = synthetic_meteo(start, end, seed)
 
-    # ====== Validación de reglas de fecha ======
+       # ===============================================================
+    # 🔍 Validación de reglas de aplicación (v3.12 — reglas fenológicas reales)
+    # ===============================================================
+    # Definición de ventanas según la siembra (sow_date) y desarrollo térmico estimado:
+    # - PreR: entre 30 y 14 días antes de la siembra
+    # - PreemR: entre siembra y emergencia del cultivo (≈ +200 °Cd ≈ 7–10 días)
+    # - PostR: desde 2 hojas del cultivo (≈ +300 °Cd ≈ +15–20 días)
+    # - Gram: entre 3 y 4 hojas (≈ +400 °Cd ≈ +20–25 días)
+    #
+    # Nota: los límites fenológicos se aproximan en días calendario a partir de siembra.
+
+    # Límite inferior y superior de cada ventana (en días relativos)
+    preR_start  = sow - dt.timedelta(days=30)
+    preR_end    = sow - dt.timedelta(days=14)
+    preemR_start = sow
+    preemR_end   = sow + dt.timedelta(days=10)      # hasta emergencia del cultivo
+    postR_start  = sow + dt.timedelta(days=20)      # ≈ 2 hojas
+    postR_end    = sow + dt.timedelta(days=180)     # hasta fin de ciclo
+    gram_start   = sow + dt.timedelta(days=25)      # 3 hojas
+    gram_end     = sow + dt.timedelta(days=35)      # 4 hojas
+
+    # ====== Validación de reglas ======
     if enforce_rules:
-        if preR_date is not None and preR_date > (sow - dt.timedelta(days=14)):
-            return None  # inválido
-        if preemR_date is not None and not (sow <= preemR_date <= sow + dt.timedelta(days=10)):
+        if preR_date is not None and not (preR_start <= preR_date <= preR_end):
             return None
-        if postR_date is not None and postR_date < (sow + dt.timedelta(days=20)):
+        if preemR_date is not None and not (preemR_start <= preemR_date <= preemR_end):
             return None
-        if gram_date is not None and not (sow <= gram_date <= sow + dt.timedelta(days=10)):
+        if postR_date is not None and not (postR_start <= postR_date <= postR_end):
             return None
+        if gram_date is not None and not (gram_start <= gram_date <= gram_end):
+            return None
+
+    # Ventanas (sets de fechas) según duración residual
+    preR_window   = set() if preR_date is None else _date_range(preR_date, preR_residual)
+    preemR_window = set() if preemR_date is None else _date_range(preemR_date, preemR_residual)
+    postR_window  = set() if postR_date is None else _date_range(postR_date, postR_residual)
+    gram_window   = set() if gram_date is None else _date_range(gram_date, gram_residual_forward)
+
 
     # Ventanas (sets de fechas)
     preR_window   = set() if preR_date is None else _date_range(preR_date, preR_residual)
