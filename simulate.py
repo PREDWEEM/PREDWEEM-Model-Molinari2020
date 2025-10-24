@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 # ===============================================================
-# 🌾 WeedCropSystem — v3.15.1 (Integrado + AUC ponderado + Seguro)
+# 🌾 WeedCropSystem — v3.15.2 (Cruce en PC + AUC base + pérdida diaria)
 # ---------------------------------------------------------------
-# - Supuesto 1: lote limpio a la siembra (sin malezas previas)
-# - Supuesto 2: sensibilidad ×5 en período crítico (8/oct–4/nov)
-# - AUC ponderado con integración trapezoidal
-# - Función hiperbólica aplicada al AUC total (final y running)
-# - Gateo jerárquico con reglas preR, preemR, postR, gram
-# - Bloques unificados y seguros para Streamlit Cloud
+# - Lote limpio a la siembra
+# - Sensibilidad ×5 aplicada SOLO a la pérdida diaria dentro del PC (8/oct–4/nov)
+# - AUC base (WC sin ponderar) con integración trapezoidal
+# - Gateo jerárquico (preR → preemR → postR → gram) con reglas y residualidad
+# - Streamlit integrado + Optimización de fechas + franja visual del PC
 # ===============================================================
 
 import sys, datetime as dt
@@ -16,11 +15,11 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import itertools, random
-from datetime import date as _date
+from datetime import date as _date, timedelta
 
-# ===============================================================
-# 🌱 BLOQUE 1 — Fisiología + simulador base
-# ===============================================================
+# -----------------------------
+# Meteorología sintética simple
+# -----------------------------
 def synthetic_meteo(start, end, seed=42):
     rng = np.random.default_rng(int(seed))
     dates = pd.date_range(start, end, freq="D")
@@ -32,6 +31,9 @@ def synthetic_meteo(start, end, seed=42):
                       p=[0.55,0.15,0.10,0.05,0.07,0.05,0.03])
     return pd.DataFrame({"date":dates,"tmin":tmin,"tmax":tmax,"prec":prec})
 
+# -----------------------------
+# Fisiología y competencia
+# -----------------------------
 def emergence_simple(TT, prec):
     base = 1.0/(1.0 + np.exp(-(TT-300)/40.0))
     pulse = 0.002 if float(prec) >= 5.0 else 0.0
@@ -55,9 +57,9 @@ def ciec_calendar(days_since_sow, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca):
 def _date_range(start_date, days):
     return {start_date + dt.timedelta(days=i) for i in range(int(days))}
 
-# ===============================================================
-# 🧠 Simulador con AUC ponderado (trapezoidal)
-# ===============================================================
+# -------------------------------------------------------
+# Simulador: WC, AUC base y pérdida diaria con sens. en PC
+# -------------------------------------------------------
 def simulate_with_controls(
     nyears=1, seed_bank0=4500, K=250, Tb=0.0, seed=42,
     sow_date=dt.date(2025,6,1),
@@ -75,7 +77,7 @@ def simulate_with_controls(
     end = dt.date(sow.year + int(nyears) - 1, 12, 1)
     meteo = synthetic_meteo(start, end, seed)
 
-    # Ventanas con reglas
+    # Reglas fenológicas
     preR_rng  = (sow - dt.timedelta(days=30), sow - dt.timedelta(days=14))
     preem_rng = (sow, sow + dt.timedelta(days=10))
     postR_rng = (sow + dt.timedelta(days=20), sow + dt.timedelta(days=180))
@@ -94,41 +96,35 @@ def simulate_with_controls(
 
     EPS = 1e-9
     Sq, TTw = float(seed_bank0), 0.0
-    W = [0,0,0,0,0]           # S1..S4, S5
-    Th = [70, 280, 400, 300]  # umbrales térmicos por bloque
+    W = [0,0,0,0,0]  # S1..S4, S5
+    Th = [70, 280, 400, 300]
     out = []
 
     for _, row in meteo.iterrows():
         date = pd.to_datetime(row["date"]).date()
-
-        # 🌱 Supuesto 1: lote limpio a la siembra
         if date < sow:
-            continue
+            continue  # Lote limpio antes de la siembra
 
         dss = (date - sow).days
         Tmean = (row["tmin"] + row["tmax"]) / 2
         TTw += max(Tmean - Tb, 0)
-
-        # Canopia y supresión
         Ciec_t, LAI_t = ciec_calendar(dss, LAI_max, t_lag, t_close, LAI_hc, Cs, Ca)
-
-        # Emergencia (con pulso por lluvia)
         E_t = 2.0 * emergence_simple(TTw, row["prec"])
 
-        # Densidad efectiva por competencia intraespecífica
+        # Densidad efectiva (intraespecífica)
         Wk = sum(np.array(W)*np.array([0.15,0.3,1.0,1.2,0.0]))
         surv_intra = 1 - min(Wk/K,1)
 
-        # Ingreso a S1 con supresión por canopia
+        # Supresión por canopia y entradas a S1
         I1_t = max(0, Sq * E_t * surv_intra * (1-Ciec_t)**p_S1)
 
-        # Stocks ajustados por canopia para S2..S4
+        # Stocks ajustados por canopia S2..S4
         Wc = W.copy()
         Wc[1] *= (1-Ciec_t)**p_S2
         Wc[2] *= (1-Ciec_t)**p_S3
         Wc[3] *= (1-Ciec_t)**p_S4
 
-        # Gateo jerárquico de controles (independencia probabilística)
+        # Gateo jerárquico con independencia probabilística
         eff_accum = 0.0
         def _rem(states): return sum(Wc[i] for i,s in enumerate(["S1","S2","S3","S4"]) if s in states)
         def _apply(eff, states):
@@ -145,7 +141,7 @@ def simulate_with_controls(
         if date in postR_window:  _apply(postR_eff,  ["S1","S2","S3","S4"])
         if date in gram_window:   _apply(gram_eff,   ["S1","S2","S3"])
 
-        # Transiciones discretas por umbral térmico acumulado
+        # Transiciones discretas por umbral térmico
         O1 = I1_t if TTw>=Th[0] else 0
         O2 = Wc[1] if TTw>=sum(Th[:2]) else 0
         O3 = Wc[2] if TTw>=sum(Th[:3]) else 0
@@ -158,61 +154,58 @@ def simulate_with_controls(
         W5 = max(0, Wc[4]+O4)
         W = [W1,W2,W3,W4,W5]
 
-        out.append({
-            "date":date,"days_since_sow":dss,"TTw":TTw,"Ciec":Ciec_t,"LAI":LAI_t,
-            "W1":W1,"W2":W2,"W3":W3,"W4":W4
-        })
+        out.append({"date":date,"days_since_sow":dss,"TTw":TTw,"Ciec":Ciec_t,"LAI":LAI_t,
+                    "W1":W1,"W2":W2,"W3":W3,"W4":W4})
 
     df = pd.DataFrame(out)
-    if df.empty:
+    if df.empty: 
         return df
 
-    # Competencia instantánea (WC) con pesos por estado
+    # Competencia instantánea
     df["W_total"] = df[["W1","W2","W3","W4"]].sum(axis=1)
     df["WC"] = w_S1*df["W1"] + w_S2*df["W2"] + w_S3*df["W3"] + w_S4*df["W4"]
 
-    # Período crítico con sensibilidad ×5
+    # Período Crítico
     PC_ini = dt.date(sow.year, 10, 8)
     PC_fin = dt.date(sow.year, 11, 4)
-    df["Sens_factor"] = np.where((df["date"]>=PC_ini)&(df["date"]<=PC_fin), 5.0, 1.0)
 
-    # ======== AUC ponderado (trapezoidal) ========
-wcw = (df["WC"] * df["Sens_factor"]).to_numpy()
-auc_running = np.concatenate(([0.0], np.cumsum(0.5*(wcw[1:] + wcw[:-1]))))
-df["AUC_weighted"] = auc_running
+    # -------- AUC base (WC sin ponderar) — trapezoidal
+    wc = df["WC"].to_numpy()
+    auc_running = np.concatenate(([0.0], np.cumsum(0.5*(wc[1:] + wc[:-1]))))
+    df["AUC_base"] = auc_running
+    df.attrs["AUC_base_final"] = float(df["AUC_base"].iloc[-1])
 
-# ======== Cálculo de pérdida diaria ponderada ========
-def _loss(x, alpha, Lmax): return (alpha*x)/(1+(alpha*x/Lmax))
+    # -------- Pérdida diaria con sensibilidad ×5 SOLO en PC
+    def _loss(x, alpha, Lmax): 
+        x = float(max(x,0.0))
+        return (alpha*x) / (1.0 + (alpha*x/Lmax))
 
-# Aplicar pérdida incremental diaria
-df["Loss_daily"] = 0.0
-for i in range(1, len(df)):
-    delta_auc = df["AUC_weighted"].iloc[i] - df["AUC_weighted"].iloc[i-1]
-    if PC_ini <= df["date"].iloc[i] <= PC_fin:
-        delta_loss = _loss(delta_auc * 5.0, alpha, Lmax)  # sensibilidad ×5 solo dentro del PC
-    else:
-        delta_loss = _loss(delta_auc, alpha, Lmax)
-    df.loc[i, "Loss_daily"] = delta_loss
+    loss_daily = [0.0]
+    for i in range(1, len(df)):
+        delta_auc = df["AUC_base"].iloc[i] - df["AUC_base"].iloc[i-1]  # área del día i
+        date_i = df["date"].iloc[i]
+        sens = 5.0 if (PC_ini <= date_i <= PC_fin) else 1.0
+        loss_daily.append(_loss(delta_auc * sens, alpha, Lmax))
 
-# Pérdida acumulada (running)
-df["Loss_running_%"] = np.cumsum(df["Loss_daily"])
+    df["Loss_daily_%"]   = loss_daily
+    df["Loss_running_%"] = np.cumsum(df["Loss_daily_%"])
 
-
+    # Rinde
     df["Yield_relative_%"] = 100.0 - df["Loss_running_%"]
     df["Yield_abs_kg_ha"]  = GY_pot * (df["Yield_relative_%"]/100.0)
 
-    # Métricas útiles como atributos
-    df.attrs["AUC_weighted_final"] = float(df["AUC_weighted"].iloc[-1])
-    df.attrs["Loss_final_pct"] = loss_final_pct
+    # Métricas
+    df.attrs["Loss_final_pct"] = float(df["Loss_running_%"].iloc[-1])
     df.attrs["WC_max"] = float(df["WC"].max())
+    df.attrs["PC_ini"] = PC_ini
+    df.attrs["PC_fin"] = PC_fin
     return df
 
-# ===============================================================
-# 🌾 BLOQUE 2 — Streamlit principal (seguro)
-# ===============================================================
-# (Guardia: en un único archivo no hace falta, pero es inofensivo)
-if "simulate_with_controls" not in globals():
-    from __main__ import simulate_with_controls
+# -----------------------
+# Streamlit + Optimización
+# -----------------------
+st.set_page_config(page_title="WeedCropSystem v3.15.2", layout="wide")
+st.title("🌾 WeedCropSystem v3.15.2 — Cruce en PC (pérdida diaria sensible)")
 
 def objective_loss(params, base_kwargs):
     sim = simulate_with_controls(**base_kwargs, **params)
@@ -220,10 +213,7 @@ def objective_loss(params, base_kwargs):
         return np.inf, None
     return float(sim.attrs.get("Loss_final_pct", sim["Loss_running_%"].iloc[-1])), sim
 
-st.set_page_config(page_title="WeedCropSystem v3.15.1", layout="wide")
-st.title("🌾 WeedCropSystem v3.15.1 — AUC ponderado + Supuestos agronómicos")
-
-# ----- Parámetros base -----
+# Parámetros base (sidebar)
 st.sidebar.header("⚙️ Parámetros base")
 nyears = st.sidebar.slider("Años a simular", 1, 3, 1)
 seed_bank0 = st.sidebar.number_input("Banco inicial (semillas·m⁻²)", 0, 50000, 4500)
@@ -248,46 +238,51 @@ p_S4 = st.sidebar.slider("S4", 0.0, 2.0, 0.2, 0.1)
 
 st.sidebar.subheader("🌾 Rinde potencial y pérdida")
 GY_pot = st.sidebar.number_input("Rinde potencial (kg/ha)", 1000, 15000, 6000, 100)
-alpha, Lmax = 0.9782, 83.77  # fijos (calibrados)
+alpha  = 0.9782
+Lmax   = 83.77
 
 st.sidebar.header("Eficacias fijas (%)")
 preR_eff = st.sidebar.slider("Presiembra (S1–S2)", 0, 100, 90, 1)
 preemR_eff = st.sidebar.slider("Preemergente (S1–S2)", 0, 100, 70, 1)
 postR_eff = st.sidebar.slider("Post residual (S1–S4)", 0, 100, 85, 1)
-gram_eff = st.sidebar.slider("Graminicida (S1–S3)", 0, 100, 80, 1)
+gram_eff   = st.sidebar.slider("Graminicida (S1–S3)", 0, 100, 80, 1)
 
 st.sidebar.header("Residualidades (días)")
 preR_residual = st.sidebar.slider("preR", 10, 180, 30, 1)
 preemR_residual = st.sidebar.slider("preemR", 10, 180, 30, 1)
 postR_residual = st.sidebar.slider("postR", 10, 180, 30, 1)
-gram_residual_forward = 11  # fijo (ventana corta)
+gram_residual_forward = 11  # ventana corta
 
 base_kwargs = dict(
   nyears=nyears, seed_bank0=seed_bank0, K=K, Tb=Tb, seed=sim_seed,
   sow_date=sow_date, LAI_max=LAI_max, t_lag=t_lag, t_close=t_close,
   LAI_hc=LAI_hc, Cs=Cs, Ca=Ca,
   p_S1=p_S1, p_S2=p_S2, p_S3=p_S3, p_S4=p_S4,
-  w_S1=0.15, w_S2=0.30, w_S3=0.60, w_S4=1.00,  # pesos de WC (expuestos si querés)
+  w_S1=0.15, w_S2=0.30, w_S3=0.60, w_S4=1.00,
   alpha=alpha, Lmax=Lmax, GY_pot=GY_pot,
   preR_eff=preR_eff, preemR_eff=preemR_eff, postR_eff=postR_eff, gram_eff=gram_eff,
   preR_residual=preR_residual, preemR_residual=preemR_residual, postR_residual=postR_residual,
   gram_residual_forward=gram_residual_forward, enforce_rules=True
 )
 
-# ---------------------------------------------------------------
-# Modo de ejecución
-# ---------------------------------------------------------------
 mode = st.sidebar.selectbox("Modo:", ["Simulación única", "Optimización de fechas"])
 
-# ---------------------------------------------------------------
-# 🧩 SIMULACIÓN ÚNICA
-# ---------------------------------------------------------------
+# -------------------------
+# Utilidad: franja del PC
+# -------------------------
+def add_pc_band(fig, pc_ini, pc_fin):
+    fig.add_vrect(x0=pc_ini, x1=pc_fin, fillcolor="LightSalmon", opacity=0.25,
+                  layer="below", line_width=0)
+
+# -------------------------
+# SIMULACIÓN ÚNICA
+# -------------------------
 if mode == "Simulación única":
     st.sidebar.subheader("Fechas de aplicación (respetan reglas)")
-    preR_date = st.sidebar.date_input("Presiembra (−30 a −14)", sow_date - dt.timedelta(days=20))
-    preemR_date = st.sidebar.date_input("Preemergente (0 a +10)", sow_date)
-    postR_date = st.sidebar.date_input("Postresidual (+20 a +180)", sow_date + dt.timedelta(days=30))
-    gram_date = st.sidebar.date_input("Graminicida (+25 a +35)", sow_date + dt.timedelta(days=30))
+    preR_date  = st.sidebar.date_input("Presiembra (−30 a −14)", sow_date - timedelta(days=20))
+    preemR_date= st.sidebar.date_input("Preemergente (0 a +10)", sow_date)
+    postR_date = st.sidebar.date_input("Postresidual (+20 a +180)", sow_date + timedelta(days=30))
+    gram_date  = st.sidebar.date_input("Graminicida (+25 a +35)", sow_date + timedelta(days=30))
 
     if st.sidebar.button("▶ Ejecutar simulación"):
         df = simulate_with_controls(**base_kwargs,
@@ -298,42 +293,42 @@ if mode == "Simulación única":
         else:
             st.success(f"✅ Simulación exitosa — {len(df)} días")
 
+            pc_ini, pc_fin = df.attrs["PC_ini"], df.attrs["PC_fin"]
+
             # Gráfico 1: rinde y pérdida (running)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"],
-                                     name="Rinde (kg/ha)"))
-            fig.add_trace(go.Scatter(x=df["date"], y=df["Loss_running_%"],
-                                     name="Pérdida (%)", yaxis="y2"))
+            fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
+            fig.add_trace(go.Scatter(x=df["date"], y=df["Loss_running_%"], name="Pérdida (%)", yaxis="y2"))
+            add_pc_band(fig, pc_ini, pc_fin)
             fig.update_layout(
-                title="Rinde y Pérdida de rinde (running) — AUC ponderado",
+                title="Rinde y Pérdida de rinde (running) — Sensibilidad diaria en PC",
                 xaxis_title="Fecha",
                 yaxis_title="Rinde (kg/ha)",
                 yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"),
-                template="plotly_white")
+                template="plotly_white"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Gráfico 2: competencia (WC) y AUC ponderado acumulado
+            # Gráfico 2: WC y AUC base acumulado
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(x=df["date"], y=df["WC"], name="Competencia instantánea (WC)"))
-            fig2.add_trace(go.Scatter(x=df["date"], y=df["AUC_weighted"], name="AUC ponderado (acum)"))
-            fig2.update_layout(title="Dinámica de competencia y AUC ponderado (trapezoidal)",
+            fig2.add_trace(go.Scatter(x=df["date"], y=df["AUC_base"], name="AUC base (acum)"))
+            add_pc_band(fig2, pc_ini, pc_fin)
+            fig2.update_layout(title="Competencia (WC) y AUC base (trapezoidal)",
                                template="plotly_white",
                                xaxis_title="Fecha", yaxis_title="Índice / Área")
             st.plotly_chart(fig2, use_container_width=True)
 
-            # Métricas finales
-            auc_final = df.attrs.get("AUC_weighted_final", float(df["AUC_weighted"].iloc[-1]))
-            loss_final = df.attrs.get("Loss_final_pct", float(df["Loss_running_%"].iloc[-1]))
-            st.metric("🧮 AUC ponderado final", f"{auc_final:.2f}")
+            # Métricas
+            st.metric("🧮 AUC base final", f"{df.attrs['AUC_base_final']:.2f}")
             st.metric("💰 Rinde final", f"{df['Yield_abs_kg_ha'].iloc[-1]:.0f} kg/ha")
-            st.metric("📉 Pérdida final", f"{loss_final:.2f}%")
-
+            st.metric("📉 Pérdida final", f"{df.attrs['Loss_final_pct']:.2f}%")
             st.download_button("📥 Descargar CSV", df.to_csv(index=False).encode(),
-                               "simulacion_v3151.csv","text/csv")
+                               "simulacion_v3152.csv","text/csv")
 
-# ---------------------------------------------------------------
-# 🧠 OPTIMIZACIÓN DE FECHAS
-# ---------------------------------------------------------------
+# -------------------------
+# OPTIMIZACIÓN DE FECHAS
+# -------------------------
 else:
     st.sidebar.header("Espacio de búsqueda (respetando reglas)")
     preR_enable  = st.sidebar.checkbox("Optimizar presiembra (−30..−14)", True)
@@ -352,13 +347,19 @@ else:
 
     def _cand_preR():
         days = list(range(30, 13, -int(step_preR)))  # 30..14
-        return [sow_date - dt.timedelta(days=d) for d in days if 14 <= d <= 30]
+        return [sow_date - timedelta(days=d) for d in days if 14 <= d <= 30]
     def _cand_preem():
-        return [sow_date + dt.timedelta(days=d) for d in range(0, 11, int(step_preem))]
+        return [sow_date + timedelta(days=d) for d in range(0, 11, int(step_preem))]
     def _cand_postR():
-        return [sow_date + dt.timedelta(days=d) for d in range(20, 181, int(step_postR))]
+        return [sow_date + timedelta(days=d) for d in range(20, 181, int(step_postR))]
     def _cand_gram():
-        return [sow_date + dt.timedelta(days=d) for d in range(25, 36, int(step_gram))]
+        return [sow_date + timedelta(days=d) for d in range(25, 36, int(step_gram))]
+
+    def objective_loss(params, base_kwargs=base_kwargs):
+        sim = simulate_with_controls(**base_kwargs, **params)
+        if sim is None or sim.empty:
+            return np.inf, None
+        return float(sim.attrs.get("Loss_final_pct", sim["Loss_running_%"].iloc[-1])), sim
 
     if run_opt:
         preR_list   = _cand_preR()  if preR_enable  else [None]
@@ -369,8 +370,7 @@ else:
         combos = list(itertools.product(preR_list, preem_list, postR_list, gram_list))
         if search_mode.startswith("Muestreo"):
             random.seed(123)
-            if len(combos) > max_evals:
-                combos = random.sample(combos, int(max_evals))
+            if len(combos) > max_evals: combos = random.sample(combos, int(max_evals))
         else:
             if len(combos) > max_evals:
                 st.warning(f"Grid muy grande ({len(combos):,}) → recortado a {int(max_evals):,}")
@@ -380,13 +380,13 @@ else:
         prog = st.progress(0.0)
         for i,(d_preR, d_preem, d_postR, d_gram) in enumerate(combos, 1):
             params = dict(preR_date=d_preR, preemR_date=d_preem, postR_date=d_postR, gram_date=d_gram)
-            loss, sim = objective_loss(params, base_kwargs)
+            loss, sim = objective_loss(params)
             if np.isfinite(loss):
                 rows.append({
                     "preR": d_preR, "preemR": d_preem, "postR": d_postR, "gram": d_gram,
                     "loss_pct": loss,
-                    "AUC_weighted": None if (sim is None or sim.empty) else float(sim.attrs.get("AUC_weighted_final", sim["AUC_weighted"].iloc[-1])),
-                    "WC_max": None if (sim is None or sim.empty) else float(sim.attrs.get("WC_max", sim["WC"].max()))
+                    "AUC_base": None if (sim is None or sim.empty) else float(sim.attrs.get("AUC_base_final", sim["AUC_base"].iloc[-1])),
+                    "WC_max":  None if (sim is None or sim.empty) else float(sim.attrs.get("WC_max", sim["WC"].max()))
                 })
             if i % max(1, len(combos)//100) == 0:
                 prog.progress(min(1.0, i/len(combos)))
@@ -397,36 +397,32 @@ else:
         else:
             res_df = pd.DataFrame(rows).sort_values("loss_pct").reset_index(drop=True)
             best = res_df.iloc[0]
-            st.success(
-                f"🏆 Mejor pérdida: {best['loss_pct']:.2f}%  "
-                f"| AUC*: {best['AUC_weighted']:.2f}  "
-                f"| WC_max: {best['WC_max']:.2f}"
-            )
+            st.success(f"🏆 Mejor pérdida: {best['loss_pct']:.2f}% | AUC: {best['AUC_base']:.2f} | WC_max: {best['WC_max']:.2f}")
             st.dataframe(res_df.head(15), use_container_width=True)
             st.download_button("📥 Descargar resultados CSV",
                                res_df.to_csv(index=False).encode(),
-                               "opt_fechas_resultados_v3151.csv","text/csv")
+                               "opt_fechas_resultados_v3152.csv","text/csv")
 
             # Re-simular el mejor escenario
             df_best = simulate_with_controls(**base_kwargs,
                 preR_date=best["preR"], preemR_date=best["preemR"],
                 postR_date=best["postR"], gram_date=best["gram"])
             if df_best is not None and not df_best.empty:
+                pc_ini, pc_fin = df_best.attrs["PC_ini"], df_best.attrs["PC_fin"]
+
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=df_best["date"], y=df_best["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
                 fig.add_trace(go.Scatter(x=df_best["date"], y=df_best["Loss_running_%"], name="Pérdida (%)", yaxis="y2"))
+                add_pc_band(fig, pc_ini, pc_fin)
                 fig.update_layout(title="📈 Mejor escenario — Rinde y Pérdida (running)",
                                   template="plotly_white",
                                   xaxis_title="Fecha", yaxis_title="Rinde (kg/ha)",
                                   yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"))
                 st.plotly_chart(fig, use_container_width=True)
 
-                auc_final = df_best.attrs.get("AUC_weighted_final", float(df_best["AUC_weighted"].iloc[-1]))
-                st.metric("🧮 AUC ponderado final", f"{auc_final:.2f}")
+                st.metric("🧮 AUC base final", f"{df_best.attrs['AUC_base_final']:.2f}")
                 st.metric("💰 Rinde final", f"{df_best['Yield_abs_kg_ha'].iloc[-1]:.0f} kg/ha")
                 st.metric("🧮 Pérdida final", f"{df_best['Loss_running_%'].iloc[-1]:.2f}%")
     else:
         st.info("Ajustá el espacio de búsqueda y presioná “Ejecutar optimización”.")
-
-
 
