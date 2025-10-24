@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # ===============================================================
-# 🌾 WeedCropSystem — v3.15.2 (Cruce en PC + AUC base + pérdida diaria)
+# 🌾 WeedCropSystem — v3.15.3 (AUC ponderado global + cruce en PC)
 # ---------------------------------------------------------------
 # - Lote limpio a la siembra
-# - Sensibilidad ×5 aplicada SOLO a la pérdida diaria dentro del PC (8/oct–4/nov)
-# - AUC base (WC sin ponderar) con integración trapezoidal
+# - Sensibilidad ×5 SOLO dentro del PC (8/oct–4/nov) sobre el AUC
+# - Pérdida hiperbólica aplicada al AUC ponderado acumulado (global)
 # - Gateo jerárquico (preR → preemR → postR → gram) con reglas y residualidad
-# - Streamlit integrado + Optimización de fechas + franja visual del PC
+# - Streamlit integrado + Optimización de fechas + franja del PC
 # ===============================================================
 
 import sys, datetime as dt
@@ -58,7 +58,7 @@ def _date_range(start_date, days):
     return {start_date + dt.timedelta(days=i) for i in range(int(days))}
 
 # -------------------------------------------------------
-# Simulador: WC, AUC base y pérdida diaria con sens. en PC
+# Simulador: WC, AUC base, AUC ponderado y pérdida global
 # -------------------------------------------------------
 def simulate_with_controls(
     nyears=1, seed_bank0=4500, K=250, Tb=0.0, seed=42,
@@ -85,7 +85,7 @@ def simulate_with_controls(
 
     if enforce_rules:
         if preR_date and not (preR_rng[0] <= preR_date <= preR_rng[1]): return None
-        if preemR_date and not (preem_rng[0] <= preemR_date <= preem_rng[1]): return None
+        if preemR_date and not (preem_rng[0] <= preemR_date <= preemR_rng[1]): return None
         if postR_date and not (postR_rng[0] <= postR_date <= postR_rng[1]): return None
         if gram_date and not (gram_rng[0] <= gram_date <= gram_rng[1]): return None
 
@@ -158,7 +158,7 @@ def simulate_with_controls(
                     "W1":W1,"W2":W2,"W3":W3,"W4":W4})
 
     df = pd.DataFrame(out)
-    if df.empty: 
+    if df.empty:
         return df
 
     # Competencia instantánea
@@ -169,27 +169,30 @@ def simulate_with_controls(
     PC_ini = dt.date(sow.year, 10, 8)
     PC_fin = dt.date(sow.year, 11, 4)
 
-  
-    # -------- Pérdida diaria con sensibilidad ×5 SOLO en PC
-    def _loss(x, alpha, Lmax): 
-        x = float(max(x,0.0))
-        return (alpha*x) / (1.0 + (alpha*x/Lmax))
+    # -------- AUC base (WC sin ponderar) — trapezoidal
+    wc = df["WC"].to_numpy()
+    auc_base = np.concatenate(([0.0], np.cumsum(0.5*(wc[1:] + wc[:-1]))))
+    df["AUC_base"] = auc_base
 
-    loss_daily = [0.0]
-    for i in range(1, len(df)):
-        delta_auc = df["AUC_base"].iloc[i] - df["AUC_base"].iloc[i-1]  # área del día i
-        date_i = df["date"].iloc[i]
-        sens = 5.0 if (PC_ini <= date_i <= PC_fin) else 1.0
-        loss_daily.append(_loss(delta_auc * sens, alpha, Lmax))
+    # -------- AUC ponderado (sensibilidad ×5 SOLO en PC)
+    sens_factor = np.where((df["date"]>=PC_ini)&(df["date"]<=PC_fin), 5.0, 1.0)
+    wcw = df["WC"].to_numpy() * sens_factor
+    auc_weighted = np.concatenate(([0.0], np.cumsum(0.5*(wcw[1:] + wcw[:-1]))))
+    df["AUC_weighted"] = auc_weighted
 
-    df["Loss_daily_%"]   = loss_daily
-    df["Loss_running_%"] = np.cumsum(df["Loss_daily_%"])
+    # -------- Pérdida hiperbólica aplicada al AUC ponderado acumulado (global)
+    def _loss(x, alpha, Lmax):
+        return (alpha * float(x)) / (1.0 + (alpha * float(x) / Lmax))
 
-    # Rinde
+    df["Loss_running_%"] = [_loss(x, alpha, Lmax) for x in df["AUC_weighted"]]
+
+    # -------- Rinde relativo y absoluto
     df["Yield_relative_%"] = 100.0 - df["Loss_running_%"]
     df["Yield_abs_kg_ha"]  = GY_pot * (df["Yield_relative_%"]/100.0)
 
-    # Métricas
+    # -------- Guardar métricas
+    df.attrs["AUC_base_final"] = float(df["AUC_base"].iloc[-1])
+    df.attrs["AUC_weighted_final"] = float(df["AUC_weighted"].iloc[-1])
     df.attrs["Loss_final_pct"] = float(df["Loss_running_%"].iloc[-1])
     df.attrs["WC_max"] = float(df["WC"].max())
     df.attrs["PC_ini"] = PC_ini
@@ -199,8 +202,8 @@ def simulate_with_controls(
 # -----------------------
 # Streamlit + Optimización
 # -----------------------
-st.set_page_config(page_title="WeedCropSystem v3.15.2", layout="wide")
-st.title("🌾 WeedCropSystem v3.15.2 — Cruce en PC (pérdida diaria sensible)")
+st.set_page_config(page_title="WeedCropSystem v3.15.3", layout="wide")
+st.title("🌾 WeedCropSystem v3.15.3 — AUC ponderado global (cruce en PC)")
 
 def objective_loss(params, base_kwargs):
     sim = simulate_with_controls(**base_kwargs, **params)
@@ -290,36 +293,38 @@ if mode == "Simulación única":
 
             pc_ini, pc_fin = df.attrs["PC_ini"], df.attrs["PC_fin"]
 
-            # Gráfico 1: rinde y pérdida (running)
+            # Gráfico 1: rinde y pérdida (running) — eje derecho 0–40%
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df["date"], y=df["Yield_abs_kg_ha"], name="Rinde (kg/ha)"))
             fig.add_trace(go.Scatter(x=df["date"], y=df["Loss_running_%"], name="Pérdida (%)", yaxis="y2"))
             add_pc_band(fig, pc_ini, pc_fin)
             fig.update_layout(
-                title="Rinde y Pérdida de rinde (running) — Sensibilidad diaria en PC",
+                title="Rinde y Pérdida de rinde (running) — AUC ponderado en PC",
                 xaxis_title="Fecha",
                 yaxis_title="Rinde (kg/ha)",
-                yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"),
+                yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right", range=[0,40]),
                 template="plotly_white"
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Gráfico 2: WC y AUC base acumulado
+            # Gráfico 2: WC y AUC (base y ponderado)
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(x=df["date"], y=df["WC"], name="Competencia instantánea (WC)"))
             fig2.add_trace(go.Scatter(x=df["date"], y=df["AUC_base"], name="AUC base (acum)"))
+            fig2.add_trace(go.Scatter(x=df["date"], y=df["AUC_weighted"], name="AUC ponderado (acum)"))
             add_pc_band(fig2, pc_ini, pc_fin)
-            fig2.update_layout(title="Competencia (WC) y AUC base (trapezoidal)",
+            fig2.update_layout(title="Competencia y AUC (base vs ponderado en PC)",
                                template="plotly_white",
                                xaxis_title="Fecha", yaxis_title="Índice / Área")
             st.plotly_chart(fig2, use_container_width=True)
 
             # Métricas
             st.metric("🧮 AUC base final", f"{df.attrs['AUC_base_final']:.2f}")
+            st.metric("🧮 AUC ponderado final", f"{df.attrs['AUC_weighted_final']:.2f}")
             st.metric("💰 Rinde final", f"{df['Yield_abs_kg_ha'].iloc[-1]:.0f} kg/ha")
             st.metric("📉 Pérdida final", f"{df.attrs['Loss_final_pct']:.2f}%")
             st.download_button("📥 Descargar CSV", df.to_csv(index=False).encode(),
-                               "simulacion_v3152.csv","text/csv")
+                               "simulacion_v3153.csv","text/csv")
 
 # -------------------------
 # OPTIMIZACIÓN DE FECHAS
@@ -381,6 +386,7 @@ else:
                     "preR": d_preR, "preemR": d_preem, "postR": d_postR, "gram": d_gram,
                     "loss_pct": loss,
                     "AUC_base": None if (sim is None or sim.empty) else float(sim.attrs.get("AUC_base_final", sim["AUC_base"].iloc[-1])),
+                    "AUC_weighted": None if (sim is None or sim.empty) else float(sim.attrs.get("AUC_weighted_final", sim["AUC_weighted"].iloc[-1])),
                     "WC_max":  None if (sim is None or sim.empty) else float(sim.attrs.get("WC_max", sim["WC"].max()))
                 })
             if i % max(1, len(combos)//100) == 0:
@@ -392,11 +398,16 @@ else:
         else:
             res_df = pd.DataFrame(rows).sort_values("loss_pct").reset_index(drop=True)
             best = res_df.iloc[0]
-            st.success(f"🏆 Mejor pérdida: {best['loss_pct']:.2f}% | AUC: {best['AUC_base']:.2f} | WC_max: {best['WC_max']:.2f}")
+            st.success(
+                f"🏆 Mejor pérdida: {best['loss_pct']:.2f}% | "
+                f"AUC(base): {best['AUC_base']:.2f} | "
+                f"AUC(pond): {best['AUC_weighted']:.2f} | "
+                f"WC_max: {best['WC_max']:.2f}"
+            )
             st.dataframe(res_df.head(15), use_container_width=True)
             st.download_button("📥 Descargar resultados CSV",
                                res_df.to_csv(index=False).encode(),
-                               "opt_fechas_resultados_v3152.csv","text/csv")
+                               "opt_fechas_resultados_v3153.csv","text/csv")
 
             # Re-simular el mejor escenario
             df_best = simulate_with_controls(**base_kwargs,
@@ -412,12 +423,14 @@ else:
                 fig.update_layout(title="📈 Mejor escenario — Rinde y Pérdida (running)",
                                   template="plotly_white",
                                   xaxis_title="Fecha", yaxis_title="Rinde (kg/ha)",
-                                  yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right"))
+                                  yaxis2=dict(title="Pérdida (%)", overlaying="y", side="right", range=[0,40]))
                 st.plotly_chart(fig, use_container_width=True)
 
                 st.metric("🧮 AUC base final", f"{df_best.attrs['AUC_base_final']:.2f}")
+                st.metric("🧮 AUC ponderado final", f"{df_best.attrs['AUC_weighted_final']:.2f}")
                 st.metric("💰 Rinde final", f"{df_best['Yield_abs_kg_ha'].iloc[-1]:.0f} kg/ha")
                 st.metric("🧮 Pérdida final", f"{df_best['Loss_running_%'].iloc[-1]:.2f}%")
     else:
         st.info("Ajustá el espacio de búsqueda y presioná “Ejecutar optimización”.")
+
 
